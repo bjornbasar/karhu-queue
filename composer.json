@@ -1,0 +1,20 @@
+{
+    "name": "bjornbasar/karhu-queue",
+    "description": "Minimal queue/worker abstraction for the karhu PHP microframework",
+    "type": "library",
+    "license": "MIT",
+    "require": {
+        "php": ">=8.3"
+    },
+    "suggest": {
+        "bjornbasar/karhu-db": "For the database-backed queue driver"
+    },
+    "autoload": {
+        "psr-4": {
+            "Karhu\\Queue\\": "src/"
+        }
+    },
+    "config": {
+        "sort-packages": true
+    }
+}
