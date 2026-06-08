@@ -191,4 +191,110 @@ final class DatabaseQueueTest extends TestCase
         $this->assertSame('pending', $row['status'], 'fail() must NOT transition a non-processing row');
         $this->assertNull($row['error']);
     }
+
+    // ============================================================
+    // Commit 3 — unstick()
+    //
+    // The SIGKILL-recovery story. The UPDATE's WHERE clause is the dedup
+    // (status='processing' AND updated_at < cutoff) so there's no race
+    // window vs. a live worker that completes between snapshot and write —
+    // the live worker's complete() would flip status='completed' and the
+    // unstick UPDATE simply wouldn't match the row.
+    // ============================================================
+
+    /**
+     * Insert a job row directly with a controlled updated_at, bypassing push()
+     * so we can simulate "stuck for N seconds" deterministically.
+     */
+    private function insertStuckJob(
+        string $status,
+        int $secondsAgo,
+        string $queue = 'default',
+        ?string $error = null,
+    ): int {
+        $ts = gmdate('Y-m-d H:i:s\Z', time() - $secondsAgo);
+        $id = (int) $this->db->insert('jobs', [
+            'queue' => $queue,
+            'job' => 'StuckJob',
+            'data' => '{}',
+            'status' => $status,
+            'error' => $error,
+            'updated_at' => $ts,
+        ]);
+        return $id;
+    }
+
+    public function test_unstick_resets_stuck_rows_to_pending(): void
+    {
+        $id = $this->insertStuckJob('processing', secondsAgo: 600); // 10 min ago
+
+        $reset = $this->queue->unstick(300); // 5-min threshold
+
+        $this->assertSame(1, $reset);
+        $row = $this->db->fetchOne("SELECT status FROM jobs WHERE id = :id", ['id' => $id]);
+        $this->assertNotNull($row);
+        $this->assertSame('pending', $row['status']);
+    }
+
+    public function test_unstick_respects_threshold(): void
+    {
+        // Fresh processing row (10s ago) — must NOT be touched at 300s threshold.
+        $fresh = $this->insertStuckJob('processing', secondsAgo: 10);
+
+        $reset = $this->queue->unstick(300);
+
+        $this->assertSame(0, $reset);
+        $row = $this->db->fetchOne("SELECT status FROM jobs WHERE id = :id", ['id' => $fresh]);
+        $this->assertNotNull($row);
+        $this->assertSame('processing', $row['status']);
+    }
+
+    public function test_unstick_is_idempotent(): void
+    {
+        // First call resets; the bump on updated_at means second call finds
+        // nothing matching < cutoff anymore — even at the same threshold.
+        $this->insertStuckJob('processing', secondsAgo: 600);
+
+        $first = $this->queue->unstick(300);
+        $second = $this->queue->unstick(300);
+
+        $this->assertSame(1, $first);
+        $this->assertSame(0, $second);
+    }
+
+    public function test_unstick_clears_error_and_bumps_updated_at(): void
+    {
+        // A stuck row may carry a stale error from a previous failed attempt
+        // (e.g. unstick used after a fail() that should have been a soft retry).
+        // Clear it so the re-popped handler sees a clean slate.
+        $id = $this->insertStuckJob('processing', secondsAgo: 600, error: 'stale boom');
+
+        $this->queue->unstick(300);
+
+        $row = $this->db->fetchOne("SELECT status, error, updated_at FROM jobs WHERE id = :id", ['id' => $id]);
+        $this->assertNotNull($row);
+        $this->assertSame('pending', $row['status']);
+        $this->assertNull($row['error']);
+        $bumped = strtotime((string) $row['updated_at']);
+        $this->assertNotFalse($bumped);
+        $this->assertLessThanOrEqual(2, abs(time() - $bumped));
+    }
+
+    public function test_unstick_scoped_to_queue_ignores_completed_and_failed(): void
+    {
+        // Mix of statuses + queues; only the 'default' queue's stuck
+        // 'processing' row should flip.
+        $stuckDefault = $this->insertStuckJob('processing', secondsAgo: 600, queue: 'default');
+        $stuckUrgent  = $this->insertStuckJob('processing', secondsAgo: 600, queue: 'urgent');
+        $oldCompleted = $this->insertStuckJob('completed', secondsAgo: 600, queue: 'default');
+        $oldFailed    = $this->insertStuckJob('failed', secondsAgo: 600, queue: 'default');
+
+        $reset = $this->queue->unstick(300, 'default');
+
+        $this->assertSame(1, $reset, 'only the stuck default row should reset');
+        $this->assertSame('pending', $this->db->fetchOne("SELECT status FROM jobs WHERE id = :id", ['id' => $stuckDefault])['status']);
+        $this->assertSame('processing', $this->db->fetchOne("SELECT status FROM jobs WHERE id = :id", ['id' => $stuckUrgent])['status']);
+        $this->assertSame('completed', $this->db->fetchOne("SELECT status FROM jobs WHERE id = :id", ['id' => $oldCompleted])['status']);
+        $this->assertSame('failed', $this->db->fetchOne("SELECT status FROM jobs WHERE id = :id", ['id' => $oldFailed])['status']);
+    }
 }

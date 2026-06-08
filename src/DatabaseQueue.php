@@ -97,4 +97,22 @@ final class DatabaseQueue implements QueueInterface
             ['error' => $reason, 'now' => $now, 'id' => $id],
         );
     }
+
+    public function unstick(int $thresholdSeconds, ?string $queue = null): int
+    {
+        // Trailing 'Z' = explicit UTC literal so PG's TIMESTAMPTZ comparison
+        // doesn't drift with the session TimeZone setting; SQLite TEXT
+        // compares lexicographically on the ISO shape either way.
+        $cutoff = gmdate('Y-m-d H:i:s\Z', time() - $thresholdSeconds);
+        $now = gmdate('Y-m-d H:i:s\Z');
+        $sql = "UPDATE {$this->table}
+                SET status = 'pending', error = NULL, updated_at = :now
+                WHERE status = 'processing' AND updated_at < :cutoff";
+        $params = ['now' => $now, 'cutoff' => $cutoff];
+        if ($queue !== null) {
+            $sql .= ' AND queue = :queue';
+            $params['queue'] = $queue;
+        }
+        return $this->db->run($sql, $params);
+    }
 }
