@@ -47,6 +47,14 @@ CREATE TABLE jobs (
 );
 ```
 
+`updated_at` tracks the **last status transition** (v0.2.0+). `push()` relies
+on the INSERT default; `pop()`, `complete()`, and `fail()` each bump it.
+This is what `unstick()` keys off to detect stuck-in-`processing` rows.
+
+`complete()` and `fail()` are guarded by `WHERE id = :id AND status = 'processing'`
+so a row that's already been reset (e.g. by `unstick()`) is never silently
+flipped to `completed`/`failed` by a stale handler.
+
 ## Custom drivers
 
 Implement `QueueInterface` for Redis, RabbitMQ, etc.

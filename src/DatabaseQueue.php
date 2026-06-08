@@ -21,6 +21,11 @@ use Karhu\Db\Connection;
  *         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
  *         updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
  *     );
+ *
+ * `updated_at` semantics (v0.2.0+): every status transition bumps `updated_at`.
+ * pop() flips pending→processing AND bumps; complete() flips processing→completed
+ * AND bumps; fail() flips processing→failed AND bumps. Prior to v0.2.0 only
+ * INSERT touched `updated_at` so it was effectively a row-creation timestamp.
  */
 final class DatabaseQueue implements QueueInterface
 {
@@ -50,8 +55,14 @@ final class DatabaseQueue implements QueueInterface
             return null;
         }
 
-        // Mark as processing
-        $this->db->update($this->table, ['status' => 'processing'], ['id' => $row['id']]);
+        // Flip pending→processing AND bump updated_at so the stuck-job
+        // detector (see unstick()) treats this as a fresh transition.
+        // Trailing 'Z' makes the literal explicit UTC for PG TIMESTAMPTZ.
+        $now = gmdate('Y-m-d H:i:s\Z');
+        $this->db->run(
+            "UPDATE {$this->table} SET status = 'processing', updated_at = :now WHERE id = :id",
+            ['now' => $now, 'id' => $row['id']],
+        );
 
         /** @var array<string, mixed> $decoded */
         $decoded = json_decode((string) $row['data'], true) ?? [];
@@ -65,11 +76,25 @@ final class DatabaseQueue implements QueueInterface
 
     public function complete(string|int $id): void
     {
-        $this->db->update($this->table, ['status' => 'completed'], ['id' => $id]);
+        // status='processing' guard prevents an unstick→re-pop→mid-handler-complete
+        // race from silently flipping pending→completed (skipping processing).
+        // Library-level safety; single-worker mishka doesn't trigger it today.
+        $now = gmdate('Y-m-d H:i:s\Z');
+        $this->db->run(
+            "UPDATE {$this->table} SET status = 'completed', updated_at = :now
+             WHERE id = :id AND status = 'processing'",
+            ['now' => $now, 'id' => $id],
+        );
     }
 
     public function fail(string|int $id, string $reason = ''): void
     {
-        $this->db->update($this->table, ['status' => 'failed', 'error' => $reason], ['id' => $id]);
+        // Same status guard as complete() — see that method for rationale.
+        $now = gmdate('Y-m-d H:i:s\Z');
+        $this->db->run(
+            "UPDATE {$this->table} SET status = 'failed', error = :error, updated_at = :now
+             WHERE id = :id AND status = 'processing'",
+            ['error' => $reason, 'now' => $now, 'id' => $id],
+        );
     }
 }
