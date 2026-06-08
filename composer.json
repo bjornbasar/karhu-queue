@@ -6,6 +6,10 @@
     "require": {
         "php": ">=8.3"
     },
+    "require-dev": {
+        "bjornbasar/karhu-db": "^0.1",
+        "phpunit/phpunit": "^11.0"
+    },
     "suggest": {
         "bjornbasar/karhu-db": "For the database-backed queue driver"
     },
@@ -14,7 +18,15 @@
             "Karhu\\Queue\\": "src/"
         }
     },
+    "autoload-dev": {
+        "psr-4": {
+            "Karhu\\Queue\\Tests\\": "tests/"
+        }
+    },
     "config": {
         "sort-packages": true
+    },
+    "scripts": {
+        "test": "phpunit"
     }
 }
