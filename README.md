@@ -85,8 +85,45 @@ contract that makes recovery safe.
 
 Implement `QueueInterface` for Redis, RabbitMQ, etc.
 
-## Caveats
+## Concurrency
 
-`DatabaseQueue::pop()` is **not atomic** — it's a SELECT followed by an UPDATE,
-not `SELECT … FOR UPDATE SKIP LOCKED`. Two concurrent workers can pop the
-same row. **Use a single worker per queue** until v0.3 lands the atomic claim.
+`DatabaseQueue::pop()` is atomic on PostgreSQL (9.5+) at the claim step.
+Two concurrent workers will never claim the same row: each worker's SELECT
+locks one pending row with `FOR UPDATE SKIP LOCKED` inside a transaction,
+and a second worker's SELECT skips the locked row and either claims the
+next pending one or returns `null`.
+
+```sql
+-- v0.3.0+ on PostgreSQL
+SELECT * FROM jobs
+  WHERE queue = :queue AND status = 'pending'
+  ORDER BY id ASC
+  LIMIT 1 FOR UPDATE SKIP LOCKED;
+-- then UPDATE … SET status='processing' … inside the same txn.
+```
+
+Driver detection is automatic (constructor reads `PDO::ATTR_DRIVER_NAME`);
+no caller change needed when moving from SQLite tests to PG production.
+
+FIFO is best-effort: under sequence rollback or any other source of
+non-monotonic `id`, SKIP LOCKED does not re-evaluate `ORDER BY id` after
+the lock is taken, so a row with a smaller id inserted concurrently can
+be claimed after a row with a larger id. For typical use (monotonic
+SERIAL/AUTOINCREMENT, FIFO-by-insertion semantics) this is invisible.
+
+### Other drivers
+
+- **SQLite**: `pop()` falls back to the v0.2 shape (SELECT then UPDATE, no
+  `FOR UPDATE` — SQLite rejects the syntax). SQLite's single-writer engine
+  makes the race practically rare but not eliminated. Recommendation:
+  single worker per queue on SQLite.
+- **MySQL**: same fallback as SQLite. MySQL 8.0+ supports `FOR UPDATE SKIP
+  LOCKED` but karhu-queue v0.3 doesn't enable the suffix (no test surface).
+  Single-worker until a future release.
+
+### Caller-owned transactions
+
+`pop()` opens its own transaction only if `PDO::inTransaction()` is `false`.
+If you call `pop()` inside an outer transaction, the row lock is held by
+your outer txn and released on your commit/rollback — `pop()` will not
+commit or rollback the outer txn.

@@ -1,6 +1,6 @@
 # karhu-queue — Project Documentation
 
-**Version:** 0.1.0 | **License:** MIT | **PHP:** >=8.3
+**Version:** 0.3.0 | **License:** MIT | **PHP:** >=8.3
 
 Minimal queue/worker abstraction for the [karhu](https://github.com/bjornbasar/karhu) PHP microframework. Ships with a `DatabaseQueue` driver; bring your own for Redis, RabbitMQ, etc.
 
@@ -23,7 +23,7 @@ Zero runtime dependencies. karhu-db is *suggested* (only required if you use `Da
 ```
 karhu-queue/
 ├── src/
-│   ├── QueueInterface.php   # push/pop/markDone/markFailed contract
+│   ├── QueueInterface.php   # push/pop/complete/fail/unstick contract
 │   ├── DatabaseQueue.php    # karhu-db backed driver — single `jobs` table
 │   └── Worker.php           # Job dispatcher — register handler closures, run loop
 └── composer.json
@@ -37,10 +37,11 @@ karhu-queue/
 
 | Method | Description |
 |---|---|
-| `push(string $job, array $data, string $queue = 'default'): string` | Enqueue. Returns job ID. |
-| `pop(string $queue = 'default'): ?array` | Pull next pending job (atomic — driver decides locking). |
-| `markDone(string $id): void` | Mark complete. |
-| `markFailed(string $id, string $error): void` | Mark failed with error message. |
+| `push(string $job, array $data, string $queue = 'default'): void` | Enqueue. |
+| `pop(string $queue = 'default'): ?array` | Pull next pending job. Atomic on PG (FOR UPDATE SKIP LOCKED); race-prone on SQLite/MySQL — see README Concurrency section. |
+| `complete(string\|int $id): void` | Mark complete. Status-guarded (`WHERE status='processing'`) — safe against unstick-then-stale-handler races. |
+| `fail(string\|int $id, string $reason = ''): void` | Mark failed with reason. Same status guard as `complete()`. |
+| `unstick(int $thresholdSeconds, ?string $queue = null): int` | Reset rows stuck in `processing` longer than threshold back to `pending`. Returns count reset. |
 
 ### `Karhu\Queue\DatabaseQueue`
 
@@ -80,8 +81,9 @@ $worker->run();   // blocking loop — calls $queue->pop(), dispatches, marks do
 - **Zero runtime deps** — drivers are opt-in via the `suggest` block.
 - **Interface-first** — `QueueInterface` is the contract; `DatabaseQueue` is one implementation. Redis / RabbitMQ adapters can ship as separate packages without touching this one.
 - **Single-table schema** — easy to inspect, easy to migrate, single index on `(queue, status, id)` covers the worker hot path.
-- **No retry logic** — `markFailed` is terminal in v0.1. Retry policies belong in the worker handler (re-enqueue with a delay attribute).
+- **No retry logic** — `fail()` is terminal in v0.1. Retry policies belong in the worker handler (re-enqueue with a delay attribute).
 - **Synchronous worker** — no concurrency primitives in the package itself. Run multiple `Worker::run()` processes for parallelism.
+- **Driver-aware atomic claim (v0.3)** — `pop()` appends `FOR UPDATE SKIP LOCKED` to the SELECT when the PDO driver is `pgsql`, making the claim race-free under concurrent workers. Other drivers fall back to the v0.2 SELECT-then-UPDATE shape (documented limitation).
 
 ---
 
@@ -91,10 +93,11 @@ Implement `QueueInterface` and inject your driver where you'd otherwise pass `Da
 
 ```php
 final class RedisQueue implements QueueInterface {
-    public function push(string $job, array $data, string $queue = 'default'): string { /* ... */ }
+    public function push(string $job, array $data, string $queue = 'default'): void { /* ... */ }
     public function pop(string $queue = 'default'): ?array { /* ... */ }
-    public function markDone(string $id): void { /* ... */ }
-    public function markFailed(string $id, string $error): void { /* ... */ }
+    public function complete(string|int $id): void { /* ... */ }
+    public function fail(string|int $id, string $reason = ''): void { /* ... */ }
+    public function unstick(int $thresholdSeconds, ?string $queue = null): int { /* ... */ }
 }
 ```
 
