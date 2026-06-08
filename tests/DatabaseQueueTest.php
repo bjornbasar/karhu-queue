@@ -297,4 +297,56 @@ final class DatabaseQueueTest extends TestCase
         $this->assertSame('completed', $this->db->fetchOne("SELECT status FROM jobs WHERE id = :id", ['id' => $oldCompleted])['status']);
         $this->assertSame('failed', $this->db->fetchOne("SELECT status FROM jobs WHERE id = :id", ['id' => $oldFailed])['status']);
     }
+
+    // ============================================================
+    // v0.3 — atomic pop driver-suffix wiring + txn-management branches
+    //
+    // SQLite in-memory can't simulate a multi-worker race (one PDO per
+    // process). These tests pin the load-bearing pieces instead:
+    //   - the driver→suffix mapping (the only string PG cares about)
+    //   - the two new txn branches (caller-owned vs pop()-owned)
+    // Actual SKIP LOCKED semantics are documented PG behaviour; manual
+    // two-psql-session verification covers that out-of-band.
+    // ============================================================
+
+    public function test_compute_for_update_suffix_returns_pg_clause_for_pgsql(): void
+    {
+        $method = new \ReflectionMethod(DatabaseQueue::class, 'computeForUpdateSuffix');
+        $this->assertSame(' FOR UPDATE SKIP LOCKED', $method->invoke(null, 'pgsql'));
+    }
+
+    public function test_compute_for_update_suffix_returns_empty_for_other_drivers(): void
+    {
+        $method = new \ReflectionMethod(DatabaseQueue::class, 'computeForUpdateSuffix');
+        $this->assertSame('', $method->invoke(null, 'sqlite'));
+        $this->assertSame('', $method->invoke(null, 'mysql'));
+        $this->assertSame('', $method->invoke(null, 'unknown'));
+    }
+
+    public function test_pop_respects_caller_opened_transaction(): void
+    {
+        // When the caller is already in a txn, pop() must NOT commit it —
+        // the caller owns the lifecycle. Exercises the $started=false branch.
+        $this->queue->push('SendEmail');
+        $this->db->pdo()->beginTransaction();
+
+        $item = $this->queue->pop();
+
+        $this->assertTrue($this->db->pdo()->inTransaction(), 'caller-opened txn must still be live');
+        $this->assertNotNull($item);
+        $this->db->pdo()->commit();
+    }
+
+    public function test_pop_on_empty_queue_does_not_leak_transaction(): void
+    {
+        // Critical correctness: the null-row branch must commit (when pop()
+        // opened the txn) so Worker's sleep(5)s doesn't sit on an open
+        // snapshot blocking autovacuum / HOT pruning on PG.
+        $this->assertFalse($this->db->pdo()->inTransaction(), 'precondition: no inherited txn');
+
+        $item = $this->queue->pop();
+
+        $this->assertNull($item);
+        $this->assertFalse($this->db->pdo()->inTransaction(), 'pop() must commit even on empty-queue path');
+    }
 }
