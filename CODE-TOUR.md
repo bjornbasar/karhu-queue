@@ -1,6 +1,6 @@
 # karhu-queue — Code Tour
 
-> A **reading-guide map**, and a short **reference appendix** — outside the ten-tour sequence. Read [karhu](../karhu/CODE-TOUR.md) first, and ideally [mishka §7](../mishka/CODE-TOUR.md) (the sync/async payoff), because this package *is* the machinery that section describes. Three files, ~330 lines.
+> A **reading-guide map**, and a short **reference appendix** — outside the eleven-tour sequence. Read [karhu](../karhu/CODE-TOUR.md) first, and ideally [mishka §7](../mishka/CODE-TOUR.md) (the sync/async payoff), because this package *is* the machinery that section describes. Three files, ~330 lines.
 >
 > **How to use it:** §1 why a database is the queue; §2 the interface; §3 `DatabaseQueue` and its one genuinely sharp detail; §4 the worker; §5 exercises.
 
@@ -64,4 +64,4 @@ $worker->run();
 
 ---
 
-*Tour covers karhu-queue @ `2c6f9cd`. A reference appendix — the ten-tour sequence ends at [koda-blast](../koda-blast/CODE-TOUR.md). Engine: [karhu](../karhu/CODE-TOUR.md). Seen in production in [mishka](../mishka/CODE-TOUR.md) §7.*
+*Tour covers karhu-queue @ `2c6f9cd`. A reference appendix — the eleven-tour sequence ends at [karu](../karu/CODE-TOUR.md). Engine: [karhu](../karhu/CODE-TOUR.md). Seen in production in [mishka](../mishka/CODE-TOUR.md) §7.*
